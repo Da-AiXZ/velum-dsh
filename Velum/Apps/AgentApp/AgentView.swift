@@ -114,7 +114,7 @@ final class DshAgentModel: ObservableObject {
                 return
             }
 
-            if let ready = await Self.probeWebServer(), ready {
+            if await Self.probeWebServer() {
                 phase = .ready
                 appendLog("✓ dsh Web UI 已就绪：\(Self.webURL.absoluteString)")
                 return
