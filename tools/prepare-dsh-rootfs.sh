@@ -38,9 +38,18 @@ for tool in curl tar sha256sum; do
 done
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+cleanup() {
+  rm -rf "$WORK" 2>/dev/null || true
+  if [[ -d "$WORK" ]]; then
+    chmod -R u+w "$WORK" 2>/dev/null || sudo chmod -R u+w "$WORK" 2>/dev/null || true
+    rm -rf "$WORK" 2>/dev/null || sudo rm -rf "$WORK" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
 ROOTFS="$WORK/rootfs"
 mkdir -p "$ROOTFS"
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
 
 echo "==> 1/6 downloading Alpine minirootfs"
 curl -fL --retry 5 --retry-delay 2 -o "$WORK/alpine.tar.gz" "$ALPINE_ROOTFS_URL"
@@ -74,6 +83,12 @@ if command -v docker >/dev/null 2>&1; then
     -v "$ROOTFS:/mnt" \
     alpine:3.21 \
     apk add --root /mnt --arch aarch64 --no-cache libgcc
+  # Files written by the container are root-owned; give them back to the host
+  # user so the temporary tree can be cleaned up without sudo.
+  docker run --rm --platform linux/arm64 \
+    -v "$ROOTFS:/mnt" \
+    alpine:3.21 \
+    sh -c "chown -R '$HOST_UID:$HOST_GID' /mnt/lib /mnt/var/lib/apk 2>/dev/null || true"
 elif command -v apk >/dev/null 2>&1; then
   apk add --root "$ROOTFS" --arch aarch64 --initdb --no-cache libgcc
 else
@@ -96,6 +111,11 @@ if [[ "$BUILD_NODE_PTY" == "1" && ! -f "$ROOTFS/opt/dsh/node_modules/node-pty/bu
       echo "node-pty build did not produce build/Release/pty.node" >&2
       exit 1
     fi
+    # Hand root-owned build outputs back to the host user for cleanup.
+    docker run --rm --platform linux/arm64 \
+      -v "$ROOTFS/opt/dsh/node_modules:/work/node_modules" \
+      alpine:3.21 \
+      sh -c "chown -R '$HOST_UID:$HOST_GID' /work/node_modules/node-pty 2>/dev/null || true"
     # The compiled artifacts are now authoritative; drop foreign prebuilds.
     rm -rf "$ROOTFS/opt/dsh/node_modules/node-pty/prebuilds"
   else
