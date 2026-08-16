@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  prepare-rootfs:
-    name: Prepare Alpine rootfs (Node + dsh)
+  prepare-runtime:
+    name: Prepare rootfs + dsh runtime
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -27,25 +27,34 @@ jobs:
       - name: Set up QEMU (arm64 Alpine for native module build)
         uses: docker/setup-qemu-action@v3
 
-      - name: Prepare rootfs with Node + dsh
+      - name: Prepare small rootfs and dsh runtime
         run: |
           DSH_BUNDLE_TGZ="$PWD/packaging/dsh-bundle.tgz" \
           OUT_ROOTFS="$PWD/root.tar.gz" \
+          OUT_DSH_RUNTIME="$PWD/dsh-runtime.tgz" \
           bash tools/prepare-dsh-rootfs.sh
-          ls -lh root.tar.gz
+          ls -lh root.tar.gz dsh-runtime.tgz
 
       - name: Upload rootfs artifact
         uses: actions/upload-artifact@v4
         with:
-          name: velum-dsh-rootfs
+          name: velum-rootfs
           path: root.tar.gz
+          retention-days: 2
+          if-no-files-found: error
+
+      - name: Upload dsh runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: velum-dsh-runtime
+          path: dsh-runtime.tgz
           retention-days: 2
           if-no-files-found: error
 
   build-ipa:
     name: Build IPA (macOS + Xcode)
     runs-on: macos-15
-    needs: prepare-rootfs
+    needs: prepare-runtime
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -53,7 +62,13 @@ jobs:
       - name: Download prebuilt rootfs
         uses: actions/download-artifact@v4
         with:
-          name: velum-dsh-rootfs
+          name: velum-rootfs
+          path: .
+
+      - name: Download prebuilt dsh runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: velum-dsh-runtime
           path: .
 
       - name: Install build tools
@@ -86,6 +101,12 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             build 2>&1 | tee xcodebuild.log
+
+      - name: Verify app bundle contents
+        run: |
+          APP="$(find DerivedData/Build/Products -type d -name 'Velum.app' -path '*iphoneos*' | head -1)"
+          echo "App: $APP"
+          ls -lh "$APP/root.tar.gz" "$APP/dsh-runtime/bin/node" "$APP/dsh-runtime/bin/dsh" || exit 1
 
       - name: Package unsigned IPA
         run: |

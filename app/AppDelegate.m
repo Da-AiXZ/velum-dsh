@@ -29,6 +29,7 @@
 #include "fs/dyndev.h"
 #include "fs/devices.h"
 #include "fs/path.h"
+#include "fs/fake.h"
 #if defined(GUEST_ARM64) && defined(DEBUG)
 #include "DebugServer.h"
 #endif
@@ -102,6 +103,24 @@ static NSString *const kSkipStartupMessage = @"Skip Startup Message";
 #endif
 
     FsInitialize();
+
+    // Bind-mount the bundled dsh runtime (Node.js + node_modules) read-only
+    // into the guest at /opt/dsh. Keeping this large tree out of root.tar.gz
+    // avoids a multi-minute fakefs_import on first launch, which otherwise
+    // trips the iOS scene-create watchdog (0x8BADF00D).
+    NSURL *dshRuntimeURL = [NSBundle.mainBundle.bundleURL URLByAppendingPathComponent:@"dsh-runtime"];
+    if ([NSFileManager.defaultManager fileExistsAtPath:dshRuntimeURL.path]) {
+        generic_mkdirat(AT_PWD, "/opt", 0755);
+        int dshMountErr = fakefs_bind_mount("/opt/dsh", dshRuntimeURL.fileSystemRepresentation, true);
+        if (dshMountErr != 0) {
+            NSLog(@"[dsh] fakefs_bind_mount(/opt/dsh -> %@) failed: %d",
+                  dshRuntimeURL.path, dshMountErr);
+        } else {
+            NSLog(@"[dsh] bound %@ -> /opt/dsh (read-only)", dshRuntimeURL.path);
+        }
+    } else {
+        NSLog(@"[dsh] dsh-runtime not found in app bundle; Agent will report startup failure");
+    }
 
     // create some device nodes
     // this will do nothing if they already exist

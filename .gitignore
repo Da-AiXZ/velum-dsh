@@ -28,6 +28,7 @@ build-release/
 
 # dsh integration artifacts
 packaging/dsh-bundle.tgz
+dsh-runtime.tgz
 DerivedData/
 Payload/
 *.ipa
