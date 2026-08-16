@@ -131,10 +131,23 @@ cat > "$ROOTFS/opt/dsh/bin/dsh" <<'EOF'
 # dsh launcher for Velum. DSH_HOME lives in the fakefs, so sessions and
 # credentials survive app restarts.
 export DSH_HOME="${DSH_HOME:-/root/.dsh}"
-exec /opt/node/bin/node /opt/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js "$@"
+exec /opt/bin/node /opt/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js "$@"
 EOF
 chmod 0755 "$ROOTFS/opt/dsh/bin/dsh"
 ln -sfn /opt/dsh/bin/dsh "$ROOTFS/usr/local/bin/dsh"
+
+# Smoke test the ARM64 rootfs under qemu before packing it into the app.
+if [[ "${SMOKE_TEST:-1}" == "1" && "$(command -v docker)" != "" ]]; then
+  echo "==> smoke test: executing Node and dsh inside the ARM64 rootfs"
+  docker run --rm --platform linux/arm64 \
+    -v "$ROOTFS:/mnt" \
+    alpine:3.21 \
+    sh -lc '
+      set -e
+      echo "node: $(chroot /mnt /opt/bin/node --version)"
+      echo "dsh:  $(chroot /mnt /opt/dsh/bin/dsh --version)"
+    '
+fi
 
 tar -czf "$OUT_ROOTFS" -C "$ROOTFS" .
 echo "==> done: $OUT_ROOTFS ($(du -h "$OUT_ROOTFS" | cut -f1))"

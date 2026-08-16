@@ -34,7 +34,7 @@ final class DshAgentModel: ObservableObject {
     static let webURL = URL(string: "http://127.0.0.1:3080")!
 
     /// Wrapper installed by tools/prepare-dsh-rootfs.sh:
-    /// `exec /opt/node/bin/node /opt/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js "$@"`
+    /// `exec /opt/bin/node /opt/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js "$@"`
     /// `exec` replaces the shell so killing the stream's pid kills Node itself.
     static let launchCommand = "exec /opt/dsh/bin/dsh web --host 127.0.0.1 --port 3080"
 
