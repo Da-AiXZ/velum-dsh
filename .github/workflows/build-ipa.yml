@@ -1,0 +1,116 @@
+name: Build Velum dsh IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+
+jobs:
+  prepare-rootfs:
+    name: Prepare Alpine rootfs (Node + dsh)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Pack dsh bundle (linux-arm64-musl)
+        run: bash tools/pack-dsh-bundle.sh
+
+      - name: Set up QEMU (arm64 Alpine for native module build)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Prepare rootfs with Node + dsh
+        run: |
+          DSH_BUNDLE_TGZ="$PWD/packaging/dsh-bundle.tgz" \
+          OUT_ROOTFS="$PWD/root.tar.gz" \
+          bash tools/prepare-dsh-rootfs.sh
+          ls -lh root.tar.gz
+
+      - name: Upload rootfs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: velum-dsh-rootfs
+          path: root.tar.gz
+          retention-days: 2
+          if-no-files-found: error
+
+  build-ipa:
+    name: Build IPA (macOS + Xcode)
+    runs-on: macos-15
+    needs: prepare-rootfs
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download prebuilt rootfs
+        uses: actions/download-artifact@v4
+        with:
+          name: velum-dsh-rootfs
+          path: .
+
+      - name: Install build tools
+        run: |
+          brew install meson ninja || true
+          meson --version
+          ninja --version
+
+      - name: Show Xcode version
+        run: |
+          xcodebuild -version
+          xcode-select -p
+
+      - name: Build Velum (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Velum.xcodeproj \
+            -scheme Velum \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee xcodebuild.log
+
+      - name: Package unsigned IPA
+        run: |
+          set -e
+          APP="$(find DerivedData/Build/Products -type d -name 'Velum.app' -path '*iphoneos*' | head -1)"
+          if [[ -z "$APP" ]]; then
+            echo "Velum.app not found" >&2
+            find DerivedData -maxdepth 6 -type d -name '*.app' >&2 || true
+            exit 1
+          fi
+          echo "Packaging $APP"
+          rm -rf Payload
+          mkdir Payload
+          cp -R "$APP" Payload/
+          ditto -c -k --sequesterRsrc --keepParent Payload Velum-dsh-unsigned.ipa
+          ls -lh Velum-dsh-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Velum-dsh-unsigned-ipa
+          path: Velum-dsh-unsigned.ipa
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: xcodebuild.log
+          retention-days: 7
+          if-no-files-found: ignore
