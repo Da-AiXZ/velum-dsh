@@ -344,8 +344,6 @@ static inode_t bind_mount_ensure_inode(struct fakefs_db *fs, struct mount *mount
     db_begin_read(fs);
     inode_t ino = path_get_inode(fs, path);
     db_commit(fs);
-    if (ino != 0)
-        return ino;
 
     /* Check if it exists on host — use direct path for bind mounts */
     struct stat host_stat;
@@ -365,6 +363,24 @@ static inode_t bind_mount_ensure_inode(struct fakefs_db *fs, struct mount *mount
         mode = S_IFLNK | 0777;
     else
         mode = S_IFREG | (host_stat.st_mode & 0777);
+
+    /* Existing rows may predate host permission changes (or the 0644
+     * synthetic-mode bug), so refresh the permission bits when they differ.
+     * Without this, executables that failed once stay non-executable until
+     * the whole rootfs is reset. */
+    if (ino != 0) {
+        db_begin_read(fs);
+        struct ish_stat prev;
+        bool have_prev = inode_read_stat_if_exist(fs, ino, &prev);
+        db_commit(fs);
+        if (have_prev && (prev.mode & 0777) != (mode & 0777)) {
+            db_begin_write(fs);
+            prev.mode = mode;
+            inode_write_stat(fs, ino, &prev);
+            db_commit(fs);
+        }
+        return ino;
+    }
 
     struct ish_stat ishstat = {.mode = mode, .uid = 0, .gid = 0, .rdev = 0};
     db_begin_write(fs);
