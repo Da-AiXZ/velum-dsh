@@ -66,6 +66,9 @@ jobs:
 
       - name: Show Xcode version
         run: |
+          # Velum's Liquid Glass UI needs the iOS 26 SDK; Xcode 16 is the
+          # runner default and cannot see the `Glass` types.
+          sudo xcode-select -s /Applications/Xcode_26.3.app
           xcodebuild -version
           xcode-select -p
 
