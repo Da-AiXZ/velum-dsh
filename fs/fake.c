@@ -360,11 +360,11 @@ static inode_t bind_mount_ensure_inode(struct fakefs_db *fs, struct mount *mount
 
     uint32_t mode;
     if (S_ISDIR(host_stat.st_mode))
-        mode = S_IFDIR | 0755;
+        mode = S_IFDIR | (host_stat.st_mode & 0777);
     else if (S_ISLNK(host_stat.st_mode))
         mode = S_IFLNK | 0777;
     else
-        mode = S_IFREG | 0644;
+        mode = S_IFREG | (host_stat.st_mode & 0777);
 
     struct ish_stat ishstat = {.mode = mode, .uid = 0, .gid = 0, .rdev = 0};
     db_begin_write(fs);
