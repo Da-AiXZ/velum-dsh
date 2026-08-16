@@ -58,9 +58,11 @@ jobs:
 
       - name: Install build tools
         run: |
-          brew install meson ninja || true
+          brew install meson ninja lld || true
           meson --version
           ninja --version
+          command -v ld64.lld || true
+          command -v lld || true
 
       - name: Show Xcode version
         run: |
