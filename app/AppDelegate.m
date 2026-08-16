@@ -29,6 +29,7 @@
 #include "fs/dyndev.h"
 #include "fs/devices.h"
 #include "fs/path.h"
+#define ISH_INTERNAL 1
 #include "fs/fake.h"
 #if defined(GUEST_ARM64) && defined(DEBUG)
 #include "DebugServer.h"
