@@ -63,22 +63,22 @@ echo "==> 1/6 preparing small Alpine rootfs"
 curl -fL --retry 5 --retry-delay 2 -o "$WORK/alpine.tar.gz" "$ALPINE_ROOTFS_URL"
 tar -xzf "$WORK/alpine.tar.gz" -C "$ROOTFS"
 
-echo "==> 2/6 installing libgcc into rootfs"
+echo "==> 2/6 installing libgcc + libstdc++ into rootfs"
 if command -v docker >/dev/null 2>&1; then
   docker run --rm --platform linux/arm64 \
     -v "$ROOTFS:/mnt" \
     alpine:3.21 \
-    apk add --root /mnt --arch aarch64 --no-cache libgcc
+    apk add --root /mnt --arch aarch64 --no-cache libgcc libstdc++
   # Files written by the container are root-owned; give them back to the host
   # user so the temporary tree can be cleaned up without sudo.
   docker run --rm --platform linux/arm64 \
     -v "$ROOTFS:/mnt" \
     alpine:3.21 \
-    sh -c "chown -R '$HOST_UID:$HOST_GID' /mnt/lib /mnt/var/lib/apk 2>/dev/null || true"
+    sh -c "chown -R '$HOST_UID:$HOST_GID' /mnt/lib /mnt/usr/lib /mnt/var/lib/apk 2>/dev/null || true"
 elif command -v apk >/dev/null 2>&1; then
-  apk add --root "$ROOTFS" --arch aarch64 --initdb --no-cache libgcc
+  apk add --root "$ROOTFS" --arch aarch64 --initdb --no-cache libgcc libstdc++
 else
-  echo "WARNING: neither docker nor apk is available; libgcc not installed" >&2
+  echo "WARNING: neither docker nor apk is available; libgcc/libstdc++ not installed" >&2
 fi
 
 # dsh is reached through the bind mount at /opt/dsh.
@@ -140,9 +140,11 @@ if [[ "$BUILD_NODE_PTY" == "1" && ! -f "$RUNTIME/node_modules/node-pty/build/Rel
   fi
 fi
 
-# Node's musl build needs libgcc_s.so.1; bundle it as a fallback even though
-# the rootfs now carries libgcc as well.
+# Node's musl build and the sharp/koffi native addons need libgcc_s.so.1 and
+# libstdc++.so.6. Bundle both as an LD_LIBRARY_PATH fallback even though the
+# rootfs carries them as well.
 cp "$ROOTFS/usr/lib/libgcc_s.so.1" "$RUNTIME/lib/libgcc_s.so.1" 2>/dev/null || true
+cp "$ROOTFS/usr/lib/libstdc++.so.6" "$RUNTIME/lib/libstdc++.so.6" 2>/dev/null || true
 
 cat > "$RUNTIME/bin/dsh" <<'EOF'
 #!/bin/sh
