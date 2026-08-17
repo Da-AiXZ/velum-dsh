@@ -36,6 +36,35 @@ if [[ -d "$NODE_PTY_PREBUILDS" ]]; then
   rm -rf "$NODE_PTY_PREBUILDS"
 fi
 
+# iSH's rt_sigaction is incomplete enough that libuv's uv_signal_start can
+# fail with EINVAL. dsh's SIGTERM/SIGINT handlers are only used for graceful
+# shutdown, so wrap their registration in try/catch — the agent still works,
+# and the window-close path kills the process anyway.
+echo "==> patching dsh signal registration for iSH compatibility"
+node - "$BUNDLE_DIR/node_modules/@deepseek-ai/dsh/lib" <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const dir = process.argv[2];
+let changed = false;
+for (const name of fs.readdirSync(dir)) {
+  if (!name.startsWith('profile-boot-') || !name.endsWith('.js')) continue;
+  const file = path.join(dir, name);
+  let source = fs.readFileSync(file, 'utf8');
+  for (const sig of ['SIGTERM', 'SIGINT']) {
+    const re = new RegExp(`process\\.on\\("${sig}", \\(\\) => \\{[\\s\\S]*?\\}\\);`);
+    source = source.replace(re, (match) => {
+      changed = true;
+      return `try { ${match} } catch (signalErr) { process.stderr.write("[dsh] ${sig} handler unavailable: " + signalErr.message + "\\n"); }`;
+    });
+  }
+  if (changed) fs.writeFileSync(file, source);
+}
+if (!changed) {
+  process.stderr.write('[dsh] WARNING: signal registration patch target not found\n');
+  process.exit(2);
+}
+NODE
+
 echo "==> packing $OUT_TGZ"
 tar -czf "$OUT_TGZ" \
   -C "$BUNDLE_DIR" \
