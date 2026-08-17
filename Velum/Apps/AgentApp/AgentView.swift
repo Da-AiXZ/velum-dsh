@@ -48,7 +48,7 @@ final class DshAgentModel: ObservableObject {
         "test -x /opt/dsh/bin/dsh; echo test_exec=$?",
         "readlink /opt/dsh 2>&1 || true",
         "echo '=== dsh launch ==='",
-        "exec /opt/dsh/bin/dsh web --host 127.0.0.1 --port 3080",
+        "/opt/dsh/bin/dsh web --host 127.0.0.1 --port 3080 > /tmp/dsh.log 2>&1; _dsh_status=$?; echo \"=== dsh exited: $_dsh_status ===\"; cat /tmp/dsh.log 2>/dev/null; exit $_dsh_status",
     ].joined(separator: "; ")
 
     @Published var phase: DshAgentPhase = .starting
