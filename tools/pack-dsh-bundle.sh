@@ -78,7 +78,7 @@ for (const name of fs.readdirSync(dir)) {
   // iSH before JS can even throw. Keep the attachment service active (other
   // plugins depend on it) but replace sharp with a safe stub: attachment
   // admission calls throw INVALID_IMAGE instead of loading the native addon.
-  const attachmentFile = path.join(dir, '..', '..', 'attachment-local', 'lib', 'index.js');
+  const attachmentFile = path.join(dir, '..', '..', 'dsh-attachment-local', 'lib', 'index.js');
   const attachmentSource = fs.readFileSync(attachmentFile, 'utf8');
   const sharpImport = 'import sharp from "sharp";';
   if (attachmentSource.includes(sharpImport)) {
