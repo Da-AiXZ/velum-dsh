@@ -41,7 +41,7 @@ fi
 # shutdown, so wrap their registration in try/catch — the agent still works,
 # and the window-close path kills the process anyway.
 echo "==> patching dsh signal registration for iSH compatibility"
-node - "$BUNDLE_DIR/node_modules/@deepseek-ai/dsh/lib" <<'NODE'
+node --input-type=commonjs - "$BUNDLE_DIR/node_modules/@deepseek-ai/dsh/lib" <<'NODE'
 const fs = require('fs');
 const path = require('path');
 const dir = process.argv[2];
