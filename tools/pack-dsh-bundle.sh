@@ -75,18 +75,21 @@ for (const name of fs.readdirSync(dir)) {
     });
   }
   // sharp's musl/arm64 native module takes the whole Node process down on
-  // iSH before JS can even throw. The only plugin that imports sharp is
-  // attachment-local (optional image attachments), so disable it.
-  const basePatchFile = path.join(dir, '..', '..', 'dsh-base', 'cordis.patch.yml');
-  const basePatch = fs.readFileSync(basePatchFile, 'utf8');
-  const attachmentOld = `    - id: attachment-local\n      name: '@deepseek-ai/dsh-attachment-local'`;
-  if (basePatch.includes(attachmentOld) && !basePatch.includes('attachment-disabled-for-ish')) {
+  // iSH before JS can even throw. Keep the attachment service active (other
+  // plugins depend on it) but replace sharp with a safe stub: attachment
+  // admission calls throw INVALID_IMAGE instead of loading the native addon.
+  const attachmentFile = path.join(dir, '..', '..', 'attachment-local', 'lib', 'index.js');
+  const attachmentSource = fs.readFileSync(attachmentFile, 'utf8');
+  const sharpImport = 'import sharp from "sharp";';
+  if (attachmentSource.includes(sharpImport)) {
     fs.writeFileSync(
-      basePatchFile,
-      basePatch.replace(attachmentOld, `${attachmentOld}\n      # attachment-disabled-for-ish: sharp's native loader exits the process\n      disabled: true`)
+      attachmentFile,
+      attachmentSource.replace(sharpImport, `// sharp-disabled-for-ish: its native loader exits the process\nconst sharp = (_data, _options) => { throw new AttachmentError("Image processing is unavailable on this device.", "INVALID_IMAGE"); };`)
     );
     changed = true;
-    process.stderr.write('[dsh] attachment-local disabled for iSH\n');
+    process.stderr.write('[dsh] sharp stubbed in attachment-local for iSH\n');
+  } else {
+    process.stderr.write('[dsh] WARNING: sharp import not found in attachment-local\n');
   }
 
   // Instrument the boot boundary so a silent exit-1 still tells us exactly
