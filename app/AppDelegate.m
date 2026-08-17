@@ -8,6 +8,7 @@
 #include <resolv.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <stdio.h>
 #import <SystemConfiguration/SystemConfiguration.h>
 #import "AboutViewController.h"
 #import "AppDelegate.h"
@@ -29,6 +30,7 @@
 #include "fs/dyndev.h"
 #include "fs/devices.h"
 #include "fs/path.h"
+#include "fs/fd.h"
 #define ISH_INTERNAL 1
 #include "fs/fake.h"
 #if defined(GUEST_ARM64) && defined(DEBUG)
@@ -110,9 +112,10 @@ static NSString *const kSkipStartupMessage = @"Skip Startup Message";
     // avoids a multi-minute fakefs_import on first launch, which otherwise
     // trips the iOS scene-create watchdog (0x8BADF00D).
     NSURL *dshRuntimeURL = [NSBundle.mainBundle.bundleURL URLByAppendingPathComponent:@"dsh-runtime"];
+    int dshMountErr = -1;
     if ([NSFileManager.defaultManager fileExistsAtPath:dshRuntimeURL.path]) {
         generic_mkdirat(AT_PWD, "/opt", 0755);
-        int dshMountErr = fakefs_bind_mount("/opt/dsh", dshRuntimeURL.fileSystemRepresentation, true);
+        dshMountErr = fakefs_bind_mount("/opt/dsh", dshRuntimeURL.fileSystemRepresentation, true);
         if (dshMountErr != 0) {
             NSLog(@"[dsh] fakefs_bind_mount(/opt/dsh -> %@) failed: %d",
                   dshRuntimeURL.path, dshMountErr);
@@ -121,6 +124,24 @@ static NSString *const kSkipStartupMessage = @"Skip Startup Message";
         }
     } else {
         NSLog(@"[dsh] dsh-runtime not found in app bundle; Agent will report startup failure");
+    }
+
+    // Expose the mount result inside the guest so the dsh startup log can
+    // report exactly what the host side did.
+    char dshMountStatus[2048];
+    int dshMountStatusLen = snprintf(dshMountStatus, sizeof(dshMountStatus),
+        "path=%s\nexists=%d\nmount_err=%d\n",
+        dshRuntimeURL.fileSystemRepresentation,
+        [NSFileManager.defaultManager fileExistsAtPath:dshRuntimeURL.path] ? 1 : 0,
+        dshMountErr);
+    if (dshMountStatusLen > 0) {
+        if ((size_t)dshMountStatusLen >= sizeof(dshMountStatus))
+            dshMountStatusLen = (int)sizeof(dshMountStatus) - 1;
+        struct fd *statusFd = generic_open("/etc/velum-dsh-mount", O_WRONLY_|O_CREAT_|O_TRUNC_, 0644);
+        if (!IS_ERR(statusFd)) {
+            statusFd->ops->write(statusFd, dshMountStatus, (size_t)dshMountStatusLen);
+            fd_close(statusFd);
+        }
     }
 
     // create some device nodes

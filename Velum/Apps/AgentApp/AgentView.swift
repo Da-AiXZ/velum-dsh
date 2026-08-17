@@ -36,7 +36,20 @@ final class DshAgentModel: ObservableObject {
     /// Wrapper installed by tools/prepare-dsh-rootfs.sh:
     /// `exec /opt/bin/node /opt/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js "$@"`
     /// `exec` replaces the shell so killing the stream's pid kills Node itself.
-    static let launchCommand = "exec /opt/dsh/bin/dsh web --host 127.0.0.1 --port 3080"
+    /// The preflight echos make bind-mount failures diagnosable directly in
+    /// the in-app startup log.
+    static let launchCommand = [
+        "echo '=== dsh preflight ==='",
+        "cat /etc/velum-dsh-mount 2>&1 || true",
+        "ls -ld /opt /opt/dsh /opt/dsh/bin 2>&1 || true",
+        "ls -l /opt/dsh/bin 2>&1 || true",
+        "stat -c '%a %A %n' /opt/dsh/bin/dsh /opt/dsh/bin/node 2>&1 || true",
+        "test -r /opt/dsh/bin/dsh; echo test_read=$?",
+        "test -x /opt/dsh/bin/dsh; echo test_exec=$?",
+        "readlink /opt/dsh 2>&1 || true",
+        "echo '=== dsh launch ==='",
+        "exec /opt/dsh/bin/dsh web --host 127.0.0.1 --port 3080",
+    ].joined(separator: "; ")
 
     @Published var phase: DshAgentPhase = .starting
     @Published var logLines: [String] = []
