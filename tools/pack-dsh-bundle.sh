@@ -74,6 +74,38 @@ for (const name of fs.readdirSync(dir)) {
   })();`;
     });
   }
+  // Instrument the boot boundary so a silent exit-1 still tells us exactly
+  // which stage failed.
+  const bootOld = `\tconst ctx = await boot(NAME, rootConfig, structuredClone(allPatches(composed)), (hostCtx) => {
+\t\tapp.current = hostCtx;
+\t\thostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, options.environment);
+\t\tprovideCmdline(hostCtx, {
+\t\t\targs: options.args,
+\t\t\texit: (code) => void shutdown.shutdown(code)
+\t\t});
+\t});`;
+  const bootNew = `\tprocess.stderr.write("[dsh] boot: before boot\\n");
+\tlet ctx;
+\ttry {
+\t\tctx = await boot(NAME, rootConfig, structuredClone(allPatches(composed)), (hostCtx) => {
+\t\t\tapp.current = hostCtx;
+\t\t\thostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, options.environment);
+\t\t\tprovideCmdline(hostCtx, {
+\t\t\t\targs: options.args,
+\t\t\t\texit: (code) => void shutdown.shutdown(code)
+\t\t\t});
+\t\t});
+\t\tprocess.stderr.write("[dsh] boot: mounted, state=" + (ctx.fiber && ctx.fiber.state) + "\\n");
+\t} catch (bootErr) {
+\t\tprocess.stderr.write("[dsh] boot FAILED: " + (bootErr && bootErr.stack ? bootErr.stack : bootErr) + "\\n");
+\t\tthrow bootErr;
+\t}`;
+  if (source.includes(bootOld)) {
+    source = source.replace(bootOld, bootNew);
+    changed = true;
+  } else {
+    process.stderr.write('[dsh] WARNING: boot boundary not found; continuing\n');
+  }
   fs.writeFileSync(file, source);
 }
 if (!changed) {
