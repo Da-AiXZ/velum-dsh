@@ -74,6 +74,21 @@ for (const name of fs.readdirSync(dir)) {
   })();`;
     });
   }
+  // sharp's musl/arm64 native module takes the whole Node process down on
+  // iSH before JS can even throw. The only plugin that imports sharp is
+  // attachment-local (optional image attachments), so disable it.
+  const basePatchFile = path.join(dir, '..', '..', 'dsh-base', 'cordis.patch.yml');
+  const basePatch = fs.readFileSync(basePatchFile, 'utf8');
+  const attachmentOld = `    - id: attachment-local\n      name: '@deepseek-ai/dsh-attachment-local'`;
+  if (basePatch.includes(attachmentOld) && !basePatch.includes('attachment-disabled-for-ish')) {
+    fs.writeFileSync(
+      basePatchFile,
+      basePatch.replace(attachmentOld, `${attachmentOld}\n      # attachment-disabled-for-ish: sharp's native loader exits the process\n      disabled: true`)
+    );
+    changed = true;
+    process.stderr.write('[dsh] attachment-local disabled for iSH\n');
+  }
+
   // Instrument the boot boundary so a silent exit-1 still tells us exactly
   // which stage failed.
   const bootOld = `\tconst ctx = await boot(NAME, rootConfig, structuredClone(allPatches(composed)), (hostCtx) => {
