@@ -124,6 +124,18 @@ for (const name of fs.readdirSync(dir)) {
   } else {
     process.stderr.write('[dsh] WARNING: boot boundary not found; continuing\n');
   }
+
+  // The HMR loader entry requires `--expose-internals`, which is neither
+  // safe nor necessary for the on-device web surface. Gate the whole
+  // HMR/user-patch watch block behind DSH_NO_HMR (the runtime wrapper
+  // defaults it to 1), so the booted web tree simply stays up.
+  const hmrOld = `\tif (!signalShutdown.signal.aborted && ctx.fiber.state === 2 && ctx.get("loader") !== void 0) try {`;
+  const hmrNew = `\tif (!signalShutdown.signal.aborted && ctx.fiber.state === 2 && ctx.get("loader") !== void 0 && process.env.DSH_NO_HMR !== "1") try {`;
+  if (source.includes(hmrOld)) {
+    source = source.replace(hmrOld, hmrNew);
+    changed = true;
+    process.stderr.write(`[dsh] HMR watch gate added to ${name}\n`);
+  }
   fs.writeFileSync(file, source);
 }
 

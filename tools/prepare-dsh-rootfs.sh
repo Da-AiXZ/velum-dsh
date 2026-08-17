@@ -166,6 +166,7 @@ case "$0" in
 esac
 ROOT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 export DSH_HOME="${DSH_HOME:-/root/.dsh}"
+export DSH_NO_HMR="${DSH_NO_HMR:-1}"
 export LD_LIBRARY_PATH="$ROOT_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 exec "$ROOT_DIR/bin/node" \
   --require="$ROOT_DIR/lib/wasm-polyfill.cjs" \
