@@ -9,12 +9,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 #include "misc.h"
 #include "kernel/calls.h"
 #include "kernel/random.h"
 #include "kernel/errno.h"
 #include "fs/fd.h"
+#define ISH_INTERNAL
+#include "fs/fake.h"
 #include "kernel/elf.h"
 #include "kernel/vdso.h"
 #include "kernel/mm.h"
@@ -681,8 +684,13 @@ int __do_execve(const char *file, struct exec_args argv, struct exec_args envp) 
         return err;
     }
 
-    // if nobody has permission to execute, it should be safe to not execute
-    if (!(stat.mode & 0111)) {
+    // if nobody has permission to execute, it should be safe to not execute.
+    // App-registered bind mounts (e.g. Velum's /opt/dsh runtime) are trusted
+    // read-only host trees; their synthetic meta.db modes may lag the real
+    // host permissions, so skip the DAC exec-bit check for them.
+    char bind_host_check[PATH_MAX];
+    if (!(stat.mode & 0111) &&
+        !fakefs_bind_mount_translate_path(file, bind_host_check, sizeof(bind_host_check))) {
         fd_close(fd);
         return _EACCES;
     }
