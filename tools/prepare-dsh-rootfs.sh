@@ -111,6 +111,16 @@ if [[ ! -f "$RUNTIME/node_modules/@deepseek-ai/dsh/lib/bin.js" ]]; then
   exit 1
 fi
 
+# Ship the iSH polyfills inside the runtime so the patched bin.js can
+# preload them explicitly (the RootfsPatch overlay is unreliable on device).
+mkdir -p "$RUNTIME/lib"
+cp "$REPO_ROOT/app/RootfsPatch.bundle/files/lib/wasm-polyfill.js" "$RUNTIME/lib/wasm-polyfill.cjs"
+cp "$REPO_ROOT/app/RootfsPatch.bundle/files/lib/fetch-polyfill.js" "$RUNTIME/lib/fetch-polyfill.cjs"
+if [[ ! -s "$RUNTIME/lib/wasm-polyfill.cjs" || ! -s "$RUNTIME/lib/fetch-polyfill.cjs" ]]; then
+  echo "failed to copy iSH polyfills into runtime lib" >&2
+  exit 1
+fi
+
 echo "==> 5/6 building node-pty for linux-arm64"
 if [[ "$BUILD_NODE_PTY" == "1" && ! -f "$RUNTIME/node_modules/node-pty/build/Release/pty.node" ]]; then
   if command -v docker >/dev/null 2>&1; then
@@ -157,7 +167,10 @@ esac
 ROOT_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 export DSH_HOME="${DSH_HOME:-/root/.dsh}"
 export LD_LIBRARY_PATH="$ROOT_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-exec "$ROOT_DIR/bin/node" "$ROOT_DIR/node_modules/@deepseek-ai/dsh/lib/bin.js" "$@"
+exec "$ROOT_DIR/bin/node" \
+  --require="$ROOT_DIR/lib/wasm-polyfill.cjs" \
+  --require="$ROOT_DIR/lib/fetch-polyfill.cjs" \
+  "$ROOT_DIR/node_modules/@deepseek-ai/dsh/lib/bin.js" "$@"
 EOF
 chmod 0755 "$RUNTIME/bin/dsh"
 

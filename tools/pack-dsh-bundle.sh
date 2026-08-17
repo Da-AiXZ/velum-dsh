@@ -126,6 +126,34 @@ for (const name of fs.readdirSync(dir)) {
   }
   fs.writeFileSync(file, source);
 }
+
+// Node under iSH runs with --jitless, which removes WebAssembly. The
+// dsh wrapper passes the bundled polyfills via --require, and this patch is
+// a fallback for direct `node bin.js` runs: load the same polyfills as the
+// first body statements so WebAssembly/fetch exist before the tree boots.
+const binFile = path.join(dir, 'bin.js');
+let binSource = fs.readFileSync(binFile, 'utf8');
+if (!binSource.includes('dsh-polyfill-preload')) {
+  binSource = binSource.replace(
+    'import { readFileSync } from "node:fs";',
+    `import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+const dshPreloadRequire = createRequire(import.meta.url);
+try { dshPreloadRequire("/opt/dsh/lib/wasm-polyfill.cjs"); } catch (dshPreloadErr) { process.stderr.write("[dsh] wasm-polyfill preload failed: " + dshPreloadErr.message + "\\n"); }
+try { dshPreloadRequire("/opt/dsh/lib/fetch-polyfill.cjs"); } catch (dshPreloadErr) { process.stderr.write("[dsh] fetch-polyfill preload failed: " + dshPreloadErr.message + "\\n"); }
+// dsh-polyfill-preload`
+  );
+  if (!binSource.includes('dsh-polyfill-preload')) {
+    process.stderr.write('[dsh] ERROR: could not inject polyfill preload (import anchor not found)\n');
+    process.exit(2);
+  }
+  fs.writeFileSync(binFile, binSource);
+  changed = true;
+  process.stderr.write('[dsh] bin.js polyfill preload injected\n');
+} else {
+  process.stderr.write('[dsh] bin.js polyfill preload already present\n');
+}
+
 if (!changed) {
   process.stderr.write('[dsh] WARNING: signal registration patch target not found\n');
   process.exit(2);
