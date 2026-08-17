@@ -816,33 +816,37 @@ static int fakefs_fstat(struct fd *fd, struct statbuf *fake_stat) {
     int err = realfs.fstat(fd, fake_stat);
     if (err < 0)
         return err;
+    /* realfs.fstat reports the true host mode. Keep it for bind-mounted fds:
+     * execve checks `mode & 0111` through this callback, and the synthetic
+     * meta.db row may be stale or missing execute bits. */
+    mode_t_ host_mode = fake_stat->mode;
+    bool fd_via_bind = false;
+    char fd_path[MAX_PATH];
+    if (realfs_getpath(fd, fd_path) == 0) {
+        char host_chk[PATH_MAX];
+        bool via_hook = false;
+        fd_via_bind = bind_mount_translate_path_ex(fd_path, host_chk, sizeof(host_chk), &via_hook);
+    }
     db_begin_read(fs);
     struct ish_stat ishstat;
     if (!inode_read_stat_if_exist(fs, fd->fake_inode, &ishstat)) {
         db_rollback(fs);
-        /* meta.db row missing. If the fd's path resolves through the
-         * path-translate hook, the missing row is by design (hook-routed
-         * paths bypass meta.db, see fakefs_open). Trust the realfs.fstat
-         * result and synthesize sensible mode bits. Otherwise propagate the
-         * ENOENT so unrelated bugs aren't masked. */
-        char fd_path[MAX_PATH];
-        if (realfs_getpath(fd, fd_path) == 0) {
-            char host_chk[PATH_MAX];
-            bool via_hook = false;
-            if (bind_mount_translate_path_ex(fd_path, host_chk, sizeof(host_chk), &via_hook) && via_hook) {
-                mode_t_ type = fake_stat->mode & S_IFMT;
-                fake_stat->mode = type | (S_ISDIR(fake_stat->mode) ? 0755 : 0644);
-                fake_stat->uid = 0;
-                fake_stat->gid = 0;
-                fake_stat->rdev = 0;
-                return 0;
-            }
+        /* meta.db row missing. If the fd's path resolves through a bind
+         * mount, trust the realfs.fstat result (which already carries the
+         * real host permission bits). Otherwise propagate the ENOENT so
+         * unrelated bugs aren't masked. */
+        if (fd_via_bind) {
+            fake_stat->mode = (host_mode & S_IFMT) | (host_mode & 0777);
+            fake_stat->uid = 0;
+            fake_stat->gid = 0;
+            fake_stat->rdev = 0;
+            return 0;
         }
         return _ENOENT;
     }
     db_commit(fs);
     fake_stat->inode = fd->fake_inode;
-    fake_stat->mode = ishstat.mode;
+    fake_stat->mode = fd_via_bind ? host_mode : ishstat.mode;
     fake_stat->uid = ishstat.uid;
     fake_stat->gid = ishstat.gid;
     fake_stat->rdev = ishstat.rdev;
