@@ -254,8 +254,9 @@ private struct DshWebView: UIViewRepresentable {
         configuration.websiteDataStore = .default()
 
         // iPadOS 16.6 ships Safari/JavaScriptCore 16.6, which predates
-        // AbortSignal.any() (Safari 17.4) used by the dsh Web UI. Inject a
-        // small spec-compatible shim before any page script runs.
+        // AbortSignal.any() and Promise.withResolvers() (Safari 17.4) used by
+        // the dsh Web UI and its dynamic client bundles. Inject small
+        // spec-compatible shims before any page script runs.
         let userContentController = WKUserContentController()
         let abortedSignalShim = """
         (function () {
@@ -294,6 +295,18 @@ private struct DshWebView: UIViewRepresentable {
                 controller.signal.addEventListener("abort", function () { clearTimeout(id); });
               }
               return controller.signal;
+            };
+          }
+          // Safari 17.4 adds Promise.withResolvers(); the dynamic client
+          // bundles served by dsh also call it.
+          if (typeof Promise.withResolvers !== "function") {
+            Promise.withResolvers = function () {
+              let resolve, reject;
+              const promise = new Promise(function (res, rej) {
+                resolve = res;
+                reject = rej;
+              });
+              return { promise, resolve, reject };
             };
           }
         })();
