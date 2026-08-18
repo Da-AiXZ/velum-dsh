@@ -253,6 +253,58 @@ private struct DshWebView: UIViewRepresentable {
         configuration.mediaTypesRequiringUserActionForPlayback = []
         configuration.websiteDataStore = .default()
 
+        // iPadOS 16.6 ships Safari/JavaScriptCore 16.6, which predates
+        // AbortSignal.any() (Safari 17.4) used by the dsh Web UI. Inject a
+        // small spec-compatible shim before any page script runs.
+        let userContentController = WKUserContentController()
+        let abortedSignalShim = """
+        (function () {
+          "use strict";
+          if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any !== "function") {
+            AbortSignal.any = function (signals) {
+              const list = Array.from(signals);
+              if (list.length === 0) {
+                return typeof AbortSignal.abort === "function"
+                  ? AbortSignal.abort()
+                  : new AbortController().signal;
+              }
+              const controller = new AbortController();
+              for (const signal of list) {
+                if (signal.aborted) {
+                  controller.abort(signal.reason);
+                  break;
+                }
+                signal.addEventListener("abort", function () {
+                  controller.abort(signal.reason);
+                }, { once: true });
+              }
+              return controller.signal;
+            };
+          }
+          if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout !== "function") {
+            AbortSignal.timeout = function (ms) {
+              const controller = new AbortController();
+              const id = setTimeout(function () {
+                let reason;
+                try { reason = new DOMException("signal timed out", "TimeoutError"); }
+                catch (_) { reason = new Error("signal timed out"); }
+                controller.abort(reason);
+              }, ms);
+              if (typeof controller.signal.addEventListener === "function") {
+                controller.signal.addEventListener("abort", function () { clearTimeout(id); });
+              }
+              return controller.signal;
+            };
+          }
+        })();
+        """
+        userContentController.addUserScript(WKUserScript(
+            source: abortedSignalShim,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+        configuration.userContentController = userContentController
+
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.isOpaque = true
         webView.allowsBackForwardNavigationGestures = true
