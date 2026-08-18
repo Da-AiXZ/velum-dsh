@@ -53,6 +53,7 @@ final class DshAgentModel: ObservableObject {
 
     @Published var phase: DshAgentPhase = .starting
     @Published var logLines: [String] = []
+    @Published var showWebLog = false
 
     private var serviceTask: Task<Void, Never>?
     private var consumerTask: Task<Void, Never>?
@@ -176,11 +177,58 @@ struct AgentView: View {
 
             if model.phase != .ready {
                 statusOverlay
+            } else {
+                webDiagnosticsOverlay
             }
         }
         .background(Color(.systemBackground))
         .onAppear { model.start() }
         .onDisappear { model.shutdown() }
+    }
+
+    // MARK: - Ready-state web diagnostics
+
+    private var webDiagnosticsOverlay: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            HStack {
+                Spacer()
+                Button(model.showWebLog ? "隐藏诊断日志" : "诊断日志") {
+                    model.showWebLog.toggle()
+                }
+                .font(.caption.weight(.medium))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(.thinMaterial, in: Capsule())
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+
+            if model.showWebLog, !model.logLines.isEmpty {
+                logPanel
+                    .frame(maxHeight: 240)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 8)
+            }
+            Spacer()
+        }
+        .allowsHitTesting(true)
+    }
+
+    private var logPanel: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(model.logLines.indices, id: \.self) { index in
+                    Text(model.logLines[index])
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .padding(10)
+        }
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .allowsHitTesting(true)
     }
 
     // MARK: - Startup / failure overlay
@@ -245,6 +293,27 @@ struct AgentView: View {
 
 private struct DshWebView: UIViewRepresentable {
     @ObservedObject var model: DshAgentModel
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    final class Coordinator: NSObject, WKScriptMessageHandler {
+        weak var model: DshAgentModel?
+
+        func userContentController(
+            _ userContentController: WKUserContentController,
+            didReceive message: WKScriptMessage
+        ) {
+            guard message.name == "dshLog",
+                  let body = message.body as? [String: Any],
+                  let text = body["msg"] as? String else { return }
+            let level = body["level"] as? String ?? "web"
+            Task { @MainActor in
+                self.model?.appendLog("[web \(level)] \(text)")
+            }
+        }
+    }
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -316,6 +385,92 @@ private struct DshWebView: UIViewRepresentable {
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
+
+        // Pipe WebView-side JS errors, failed fetches, and WebSocket state
+        // changes into the in-app diagnostic log. dsh's UI shows only generic
+        // "load failed" toasts; this captures the real reason behind them.
+        let diagnosticShim = """
+        (function () {
+          "use strict";
+          var MAX = 2500;
+          function send(level, msg) {
+            try {
+              window.webkit.messageHandlers.dshLog.postMessage({ level: level, msg: String(msg).slice(0, MAX) });
+            } catch (_) {}
+          }
+          function describe(value) {
+            if (value instanceof Error) return value.stack || (value.name + ": " + value.message);
+            try { return JSON.stringify(value); } catch (_) { return String(value); }
+          }
+          var origError = console.error;
+          if (origError) {
+            console.error = function () {
+              origError.apply(console, arguments);
+              var parts = [];
+              for (var i = 0; i < arguments.length; i++) parts.push(describe(arguments[i]));
+              send("console.error", parts.join(" "));
+            };
+          }
+          var origWarn = console.warn;
+          if (origWarn) {
+            console.warn = function () {
+              origWarn.apply(console, arguments);
+              var parts = [];
+              for (var i = 0; i < arguments.length; i++) parts.push(describe(arguments[i]));
+              send("console.warn", parts.join(" "));
+            };
+          }
+          window.addEventListener("error", function (event) {
+            send("window.onerror", (event.message || "") + " @ " + (event.filename || "") + ":" + (event.lineno || 0));
+          });
+          window.addEventListener("unhandledrejection", function (event) {
+            send("unhandledrejection", describe(event.reason));
+          });
+          var origFetch = window.fetch;
+          if (origFetch) {
+            window.fetch = function () {
+              var callArgs = arguments;
+              var input = callArgs[0];
+              var url = typeof input === "string" ? input : (input && input.url ? input.url : String(input));
+              var started = Date.now();
+              return origFetch.apply(this, callArgs).then(function (response) {
+                if (!response.ok) send("fetch", url + " -> HTTP " + response.status + " (" + (Date.now() - started) + "ms)");
+                return response;
+              }, function (error) {
+                send("fetch-error", url + " :: " + describe(error));
+                throw error;
+              });
+            };
+          }
+          var OrigWebSocket = window.WebSocket;
+          if (OrigWebSocket) {
+            window.WebSocket = function (url, protocols) {
+              var socket = protocols === undefined ? new OrigWebSocket(url) : new OrigWebSocket(url, protocols);
+              send("ws", "new " + url);
+              socket.addEventListener("open", function () { send("ws", "OPEN " + url); });
+              socket.addEventListener("close", function (event) { send("ws", "CLOSE " + url + " code=" + event.code); });
+              socket.addEventListener("error", function () { send("ws", "ERROR " + url); });
+              return socket;
+            };
+            window.WebSocket.prototype = OrigWebSocket.prototype;
+            try { Object.setPrototypeOf(window.WebSocket, OrigWebSocket); }
+            catch (_) {
+              window.WebSocket.CONNECTING = OrigWebSocket.CONNECTING;
+              window.WebSocket.OPEN = OrigWebSocket.OPEN;
+              window.WebSocket.CLOSING = OrigWebSocket.CLOSING;
+              window.WebSocket.CLOSED = OrigWebSocket.CLOSED;
+            }
+          }
+          send("boot", "diagnostics installed; origin=" + location.origin + "; ua=" + navigator.userAgent + "; AbortSignal.any=" + (typeof AbortSignal.any) + "; AbortSignal.timeout=" + (typeof AbortSignal.timeout) + "; Promise.withResolvers=" + (typeof Promise.withResolvers));
+        })();
+        """
+        userContentController.addUserScript(WKUserScript(
+            source: diagnosticShim,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+        userContentController.add(context.coordinator, name: "dshLog")
+        context.coordinator.model = model
         configuration.userContentController = userContentController
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
