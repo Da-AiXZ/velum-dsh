@@ -65,6 +65,7 @@ function createParser(type) {
     chunkSize: 0,
     headersDone: false,
     crlfHalf: false,
+    pending: null,
     errorReason: 0,
     errorReasonPtr: 0,
     errorPos: 0,
@@ -93,6 +94,7 @@ function completeMessage(p, ptr) {
   p.chunkSize = 0;
   p.headersDone = false;
   p.crlfHalf = false;
+  p.pending = null;
   return rc;
 }
 
@@ -102,8 +104,23 @@ function llhttp_execute(ptr, bufPtr, bufLen) {
   if (!p) return 1; // INTERNAL error
   if (p.paused) return PAUSED;
 
+  // Prepend bytes left over from a previous partial line. Undici reuses the
+  // same malloc'd buffer, so shifting the incoming chunk right keeps every
+  // callback pointer consistent with currentBufferPtr.
+  if (p.pending && p.pending.length > 0) {
+    const pending = p.pending;
+    memU8.copyWithin(bufPtr + pending.length, bufPtr, bufPtr + bufLen);
+    memU8.set(pending, bufPtr);
+    bufLen += pending.length;
+    p.pending = null;
+  }
+
   const data = new Uint8Array(memory.buffer, bufPtr, bufLen);
   let i = 0;
+
+  const keepTail = (from) => {
+    p.pending = new Uint8Array(data.subarray(from, bufLen));
+  };
 
   while (i < bufLen) {
     switch (p.state) {
@@ -120,7 +137,7 @@ function llhttp_execute(ptr, bufPtr, bufLen) {
       case S_RES_H: {
         // Scan for end of status line (first \r\n)
         const lineEnd = findCRLF(data, i, bufLen);
-        if (lineEnd === -1) { p.errorPos = bufPtr + i; return OK; } // need more data
+        if (lineEnd === -1) { keepTail(i); p.errorPos = bufPtr + bufLen; return OK; } // need more data
 
         // Parse "HTTP/x.x SSS Reason"
         const line = decodeAscii(data, i, lineEnd); // i still points at 'H'
@@ -148,16 +165,20 @@ function llhttp_execute(ptr, bufPtr, bufLen) {
 
       case S_HEADER_FIELD: {
         // Check for end of headers (\r\n)
-        if (i < bufLen && data[i] === 0x0d) {
+        if (data[i] === 0x0d) {
           if (i + 1 < bufLen && data[i + 1] === 0x0a) {
             i += 2;
             p.state = S_HEADERS_DONE;
             break;
           }
+          if (i + 1 >= bufLen) { keepTail(i); p.errorPos = bufPtr + bufLen; return OK; }
         }
-        // Find ':'
+        // Wait until the whole header line (colon + value + CRLF) is present
+        // before emitting anything, so a TCP split never repeats a callback.
         const colonIdx = findByte(data, 0x3a, i, bufLen);
-        if (colonIdx === -1) { p.errorPos = bufPtr + i; return OK; }
+        if (colonIdx === -1) { keepTail(i); p.errorPos = bufPtr + bufLen; return OK; }
+        const valEnd = findCRLF(data, colonIdx + 1, bufLen);
+        if (valEnd === -1) { keepTail(i); p.errorPos = bufPtr + bufLen; return OK; }
 
         const fieldStart = bufPtr + i;
         const fieldLen = colonIdx - i;
@@ -166,20 +187,15 @@ function llhttp_execute(ptr, bufPtr, bufLen) {
 
         // Track transfer-encoding and content-length
         const fieldName = decodeAscii(data, i, colonIdx).toLowerCase();
-        i = colonIdx + 1;
-        // skip optional spaces
-        while (i < bufLen && data[i] === 0x20) i++;
+        let vi = colonIdx + 1;
+        while (vi < valEnd && data[vi] === 0x20) vi++;
 
-        // Find end of header value
-        const valEnd = findCRLF(data, i, bufLen);
-        if (valEnd === -1) { p.errorPos = bufPtr + i; return OK; }
-
-        const valueStart = bufPtr + i;
-        const valueLen = valEnd - i;
+        const valueStart = bufPtr + vi;
+        const valueLen = valEnd - vi;
         const rc2 = envCallbacks.wasm_on_header_value(ptr, valueStart, valueLen);
-        if (rc2) { p.errorPos = bufPtr + i; return rc2; }
+        if (rc2) { p.errorPos = bufPtr + vi; return rc2; }
 
-        const value = decodeAscii(data, i, valEnd).toLowerCase().trim();
+        const value = decodeAscii(data, vi, valEnd).toLowerCase().trim();
         if (fieldName === "transfer-encoding" && value.includes("chunked")) p.chunked = true;
         if (fieldName === "content-length") p.contentLength = parseInt(value, 10);
         if (fieldName === "connection" && value === "close") p.shouldKeepAlive = false;
@@ -254,7 +270,7 @@ function llhttp_execute(ptr, bufPtr, bufLen) {
 
       case S_BODY_CHUNKED_SIZE: {
         const lineEnd = findCRLF(data, i, bufLen);
-        if (lineEnd === -1) { p.errorPos = bufPtr + i; return OK; }
+        if (lineEnd === -1) { keepTail(i); p.errorPos = bufPtr + bufLen; return OK; }
         const sizeStr = decodeAscii(data, i, lineEnd).replace(/;.*/, "").trim();
         p.chunkSize = parseInt(sizeStr, 16);
         if (!Number.isFinite(p.chunkSize) || p.chunkSize < 0) {
@@ -328,7 +344,7 @@ function llhttp_execute(ptr, bufPtr, bufLen) {
           break;
         }
         const lineEnd = findCRLF(data, i, bufLen);
-        if (lineEnd === -1) { p.errorPos = bufPtr + i; return OK; }
+        if (lineEnd === -1) { keepTail(i); p.errorPos = bufPtr + bufLen; return OK; }
         i = lineEnd + 2;
         break;
       }
