@@ -10,9 +10,10 @@ if (typeof globalThis.WebAssembly === "undefined") {
 const S_START = 0, S_RES_H = 1, S_RES_LINE = 2, S_STATUS = 3,
       S_HEADER_FIELD = 4, S_HEADER_VALUE = 5, S_HEADERS_DONE = 6,
       S_BODY_IDENTITY = 7, S_BODY_CHUNKED_SIZE = 8, S_BODY_CHUNKED_DATA = 9,
-      S_BODY_CHUNKED_END = 10, S_COMPLETE = 11, S_DEAD = 12, S_PAUSED = 13;
+      S_BODY_CHUNKED_END = 10, S_COMPLETE = 11, S_DEAD = 12, S_PAUSED = 13,
+      S_BODY_CHUNKED_CRLF = 14;
 
-const OK = 0, PAUSED = 21, PAUSED_UPGRADE = 22;
+const OK = 0, INVALID_EOF_STATE = 14, PAUSED = 21, PAUSED_UPGRADE = 22;
 
 // Simulated WebAssembly.Memory as a growable ArrayBuffer
 const INITIAL_MEM = 1024 * 1024; // 1MB
@@ -62,7 +63,10 @@ function createParser(type) {
     chunked: false,
     remaining: 0,
     chunkSize: 0,
+    headersDone: false,
+    crlfHalf: false,
     errorReason: 0,
+    errorReasonPtr: 0,
     errorPos: 0,
     paused: false
   });
@@ -75,6 +79,21 @@ function writeStr(str) {
   for (let i = 0; i < str.length; i++) memU8[ptr + i] = str.charCodeAt(i);
   memU8[ptr + str.length] = 0;
   return ptr;
+}
+
+function completeMessage(p, ptr) {
+  const rc = envCallbacks.wasm_on_message_complete(ptr);
+  p.state = S_START; // ready for next message (keep-alive)
+  p.statusCode = 0;
+  p.upgrade = false;
+  p.shouldKeepAlive = true;
+  p.contentLength = -1;
+  p.chunked = false;
+  p.remaining = 0;
+  p.chunkSize = 0;
+  p.headersDone = false;
+  p.crlfHalf = false;
+  return rc;
 }
 
 // Parse HTTP response data
@@ -104,17 +123,17 @@ function llhttp_execute(ptr, bufPtr, bufLen) {
         if (lineEnd === -1) { p.errorPos = bufPtr + i; return OK; } // need more data
 
         // Parse "HTTP/x.x SSS Reason"
-        const line = decodeAscii(data, i - 1, lineEnd); // -1 to include 'H'
+        const line = decodeAscii(data, i, lineEnd); // i still points at 'H'
         const match = line.match(/^HTTP\/\d\.\d\s+(\d{3})\s*(.*)/);
         if (match) {
           p.statusCode = parseInt(match[1], 10);
           // Notify status
-          const statusStart = bufPtr + i - 1 + line.indexOf(match[2]);
+          const statusStart = bufPtr + i + line.indexOf(match[2]);
           const statusLen = match[2].length;
           let rc = envCallbacks.wasm_on_message_begin(ptr);
           if (rc) { p.errorPos = bufPtr + i; return rc; }
           if (statusLen > 0) {
-            rc = envCallbacks.wasm_on_status(ptr, bufPtr + i - 1 + line.indexOf(match[1]) + match[1].length + 1, statusLen);
+            rc = envCallbacks.wasm_on_status(ptr, bufPtr + i + line.indexOf(match[1]) + match[1].length + 1, statusLen);
             if (rc) { p.errorPos = bufPtr + i; return rc; }
           }
         }
@@ -171,41 +190,47 @@ function llhttp_execute(ptr, bufPtr, bufLen) {
       }
 
       case S_HEADERS_DONE: {
-        const rc = envCallbacks.wasm_on_headers_complete(ptr, p.statusCode,
-          p.upgrade ? 1 : 0, p.shouldKeepAlive ? 1 : 0);
-        if (rc === 1) {
-          // skip body
-          p.state = S_COMPLETE;
-          break;
-        }
-        if (rc === 2) {
-          p.upgrade = true;
-          p.errorPos = bufPtr + i;
-          return PAUSED_UPGRADE;
-        }
-        if (rc) { p.errorPos = bufPtr + i; return rc; }
+        let rc = 0;
+        if (!p.headersDone) {
+          rc = envCallbacks.wasm_on_headers_complete(ptr, p.statusCode,
+            p.upgrade ? 1 : 0, p.shouldKeepAlive ? 1 : 0);
+          if (rc === 1) {
+            // skip body (HEAD)
+            p.headersDone = true;
+            p.state = S_COMPLETE;
+            break;
+          }
+          if (rc === 2) {
+            p.upgrade = true;
+            p.errorPos = bufPtr + i;
+            return PAUSED_UPGRADE;
+          }
+          if (rc !== 0 && rc !== PAUSED) { p.errorPos = bufPtr + i; return rc; }
 
-        if (p.upgrade) {
-          p.errorPos = bufPtr + i;
-          return PAUSED_UPGRADE;
-        }
+          p.headersDone = true;
+          if (p.upgrade) {
+            p.errorPos = bufPtr + i;
+            return PAUSED_UPGRADE;
+          }
 
-        if (p.chunked) {
-          p.state = S_BODY_CHUNKED_SIZE;
-        } else if (p.contentLength > 0) {
-          p.state = S_BODY_IDENTITY;
-          p.remaining = p.contentLength;
-        } else if (p.contentLength === 0) {
-          p.state = S_COMPLETE;
-        } else {
-          // No content-length, no chunked: read until close (for responses)
-          // or no body (for 1xx, 204, 304)
-          if (p.statusCode === 204 || p.statusCode === 304 || (p.statusCode >= 100 && p.statusCode < 200)) {
+          if (p.chunked) {
+            p.state = S_BODY_CHUNKED_SIZE;
+          } else if (p.contentLength > 0) {
+            p.state = S_BODY_IDENTITY;
+            p.remaining = p.contentLength;
+          } else if (p.contentLength === 0) {
             p.state = S_COMPLETE;
           } else {
-            p.state = S_BODY_IDENTITY;
-            p.remaining = Infinity;
+            // No content-length, no chunked: read until close (for responses)
+            // or no body (for 1xx, 204, 304)
+            if (p.statusCode === 204 || p.statusCode === 304 || (p.statusCode >= 100 && p.statusCode < 200)) {
+              p.state = S_COMPLETE;
+            } else {
+              p.state = S_BODY_IDENTITY;
+              p.remaining = Infinity;
+            }
           }
+          if (rc === PAUSED) { p.errorPos = bufPtr + i; return rc; }
         }
         break;
       }
@@ -219,7 +244,10 @@ function llhttp_execute(ptr, bufPtr, bufLen) {
           i += toConsume;
           if (p.remaining !== Infinity) p.remaining -= toConsume;
         }
-        if (p.remaining === 0) p.state = S_COMPLETE;
+        if (p.remaining === 0) {
+          p.state = S_COMPLETE;
+          break;
+        }
         if (i >= bufLen) { p.errorPos = bufPtr + i; return OK; }
         break;
       }
@@ -229,6 +257,10 @@ function llhttp_execute(ptr, bufPtr, bufLen) {
         if (lineEnd === -1) { p.errorPos = bufPtr + i; return OK; }
         const sizeStr = decodeAscii(data, i, lineEnd).replace(/;.*/, "").trim();
         p.chunkSize = parseInt(sizeStr, 16);
+        if (!Number.isFinite(p.chunkSize) || p.chunkSize < 0) {
+          p.errorPos = bufPtr + i;
+          return 12; // INVALID_CHUNK_SIZE
+        }
         i = lineEnd + 2;
         if (p.chunkSize === 0) {
           p.state = S_BODY_CHUNKED_END;
@@ -249,39 +281,61 @@ function llhttp_execute(ptr, bufPtr, bufLen) {
           p.remaining -= toConsume;
         }
         if (p.remaining === 0) {
-          // Expect \r\n after chunk data
-          if (i + 1 < bufLen) {
-            i += 2; // skip \r\n
-            p.state = S_BODY_CHUNKED_SIZE;
-          } else {
-            p.errorPos = bufPtr + i;
-            return OK; // need more data
-          }
-        } else {
-          p.errorPos = bufPtr + i;
-          return OK;
+          p.state = S_BODY_CHUNKED_CRLF;
+          p.crlfHalf = false;
         }
+        if (i >= bufLen) { p.errorPos = bufPtr + i; return OK; }
         break;
       }
 
+      case S_BODY_CHUNKED_CRLF: {
+        if (p.crlfHalf) {
+          if (i >= bufLen) { p.errorPos = bufPtr + i; return OK; }
+          if (data[i] === 0x0a) {
+            i++;
+            p.crlfHalf = false;
+            p.state = S_BODY_CHUNKED_SIZE;
+            break;
+          }
+          p.errorPos = bufPtr + i;
+          return 1;
+        }
+        if (i >= bufLen) { p.errorPos = bufPtr + i; return OK; }
+        if (data[i] === 0x0d) {
+          if (i + 1 < bufLen) {
+            if (data[i + 1] === 0x0a) {
+              i += 2;
+              p.state = S_BODY_CHUNKED_SIZE;
+              break;
+            }
+            p.errorPos = bufPtr + i;
+            return 1;
+          }
+          p.crlfHalf = true;
+          p.errorPos = bufPtr + i;
+          return OK;
+        }
+        p.errorPos = bufPtr + i;
+        return 1;
+      }
+
       case S_BODY_CHUNKED_END: {
-        // Trailing headers or final \r\n
-        if (data[i] === 0x0d && i + 1 < bufLen && data[i + 1] === 0x0a) {
+        // After the 0-size chunk: an empty line ends the body; anything else
+        // is a trailer line to skip.
+        if (i + 1 < bufLen && data[i] === 0x0d && data[i + 1] === 0x0a) {
           i += 2;
           p.state = S_COMPLETE;
-        } else {
-          // Skip trailing headers
-          const lineEnd = findCRLF(data, i, bufLen);
-          if (lineEnd === -1) { p.errorPos = bufPtr + i; return OK; }
-          i = lineEnd + 2;
+          break;
         }
+        const lineEnd = findCRLF(data, i, bufLen);
+        if (lineEnd === -1) { p.errorPos = bufPtr + i; return OK; }
+        i = lineEnd + 2;
         break;
       }
 
       case S_COMPLETE: {
-        const rc = envCallbacks.wasm_on_message_complete(ptr);
+        const rc = completeMessage(p, ptr);
         if (rc) { p.errorPos = bufPtr + i; return rc; }
-        p.state = S_START; // ready for next message (keep-alive)
         p.errorPos = bufPtr + i;
         return OK;
       }
@@ -289,6 +343,10 @@ function llhttp_execute(ptr, bufPtr, bufLen) {
       default:
         p.errorPos = bufPtr + i;
         return 1; // INTERNAL
+    }
+    if (p.state === S_COMPLETE && i >= bufLen) {
+      const rc = completeMessage(p, ptr);
+      if (rc) { p.errorPos = bufPtr + i; return rc; }
     }
   }
 
@@ -322,6 +380,20 @@ const wasmExports = {
   llhttp_alloc(type) { return createParser(type); },
   llhttp_free(ptr) { parsers.delete(ptr); },
   llhttp_execute,
+  llhttp_finish(ptr) {
+    const p = parsers.get(ptr);
+    if (!p) return 1;
+    // A close-delimited body legitimately ends at EOF; everything else that
+    // still expects bytes is a protocol error.
+    if (p.state === S_COMPLETE || p.state === S_START) return OK;
+    if (p.state === S_BODY_IDENTITY && p.remaining === Infinity) {
+      p.state = S_COMPLETE;
+      return OK;
+    }
+    p.errorPos = 0;
+    if (!p.errorReasonPtr) p.errorReasonPtr = writeStr("invalid EOF state");
+    return INVALID_EOF_STATE;
+  },
   llhttp_resume(ptr) {
     const p = parsers.get(ptr);
     if (p) p.paused = false;
@@ -343,24 +415,37 @@ const wasmExports = {
 // Create a fake compiled WebAssembly module token
 const fakeModule = Symbol("llhttp-js-module");
 
+function captureImports(importObj) {
+  if (importObj && importObj.env) envCallbacks = importObj.env;
+}
+
 globalThis.WebAssembly = {
-  async compile(bytes) { return fakeModule; },
-  async instantiate(mod, importObj) {
-    if (importObj && importObj.env) {
-      envCallbacks = importObj.env;
-    }
-    return { exports: wasmExports };
+  async compile(bytes) { return new WebAssembly.Module(bytes); },
+  async instantiate(modOrBytes, importObj) {
+    captureImports(importObj);
+    const mod = modOrBytes instanceof WebAssembly.Module ? modOrBytes : new WebAssembly.Module(modOrBytes);
+    const instance = new WebAssembly.Instance(mod, importObj);
+    return { module: mod, instance };
   },
-  Module: function() {},
-  Instance: function() {},
+  Module: function(bytes) {
+    this._bytes = bytes;
+    this._fakeLlhttp = true;
+  },
+  Instance: function(mod, importObj) {
+    captureImports(importObj);
+    this.module = mod;
+    this.exports = wasmExports;
+  },
   Memory: function(desc) {
     return memory;
   },
   Table: function() {},
   validate(bytes) { return true; },
-  compileStreaming() { return Promise.resolve(fakeModule); },
+  compileStreaming() { return Promise.resolve(new WebAssembly.Module(null)); },
   instantiateStreaming(source, importObj) {
-    return Promise.resolve({ module: fakeModule, instance: { exports: wasmExports } });
+    captureImports(importObj);
+    const mod = new WebAssembly.Module(null);
+    return Promise.resolve({ module: mod, instance: new WebAssembly.Instance(mod, importObj) });
   }
 };
 

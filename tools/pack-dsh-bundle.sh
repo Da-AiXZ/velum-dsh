@@ -166,6 +166,46 @@ try { dshPreloadRequire("/opt/dsh/lib/fetch-polyfill.cjs"); } catch (dshPreloadE
   process.stderr.write('[dsh] bin.js polyfill preload already present\n');
 }
 
+// The web UI collapses every backend failure into a generic "load failed".
+// Log the real handler exception to stderr (dsh.log) so a device run can
+// report why settings/presets/session.prompt/export etc. actually failed.
+const apiFile = path.join(dir, '..', '..', 'dsh-host-apiproxy', 'lib', 'index.js');
+let apiSource = fs.readFileSync(apiFile, 'utf8');
+const unaryOld = `\t} catch (error) {\n\t\treturn new Response(\`handler failure: \${String(error)}\`, { status: 500 });\n\t}`;
+const unaryNew = `\t} catch (error) {\n\t\tprocess.stderr.write(\`[dsh] api \${method} failed: \${error && error.stack ? error.stack : error}\\n\`);\n\t\treturn new Response(\`handler failure: \${String(error)}\`, { status: 500 });\n\t}`;
+if (apiSource.includes(unaryOld)) {
+  apiSource = apiSource.replace(unaryOld, unaryNew);
+  changed = true;
+  process.stderr.write('[dsh] api handler failure logging added\n');
+} else {
+  process.stderr.write('[dsh] WARNING: api handler catch target not found; continuing\n');
+}
+const exportOld = `\t\t\t} catch {\n\t\t\t\tsignal.throwIfAborted();\n\t\t\t\treturn new Response("session log export failed to prepare the stored artifact", { status: 500 });\n\t\t\t}`;
+const exportNew = `\t\t\t} catch (exportErr) {\n\t\t\t\tsignal.throwIfAborted();\n\t\t\t\tprocess.stderr.write("[dsh] session export prepare failed: " + (exportErr && exportErr.stack ? exportErr.stack : exportErr) + "\\n");\n\t\t\t\treturn new Response("session log export failed to prepare the stored artifact", { status: 500 });\n\t\t\t}`;
+if (apiSource.includes(exportOld)) {
+  apiSource = apiSource.replace(exportOld, exportNew);
+  changed = true;
+  process.stderr.write('[dsh] session export error logging added\n');
+} else {
+  process.stderr.write('[dsh] WARNING: session export catch target not found; continuing\n');
+}
+fs.writeFileSync(apiFile, apiSource);
+
+// Log the real stack when an agent turn dies; the UI only shows a generic
+// "turn failed ... UNKNOWN" without the underlying module.
+const agentLoopFile = path.join(dir, '..', '..', 'dsh-agent-loop', 'lib', 'index.js');
+let agentLoopSource = fs.readFileSync(agentLoopFile, 'utf8');
+const agentLoopOld = `\t\t\tthis.throwError(error);\n\t\t} finally {`;
+const agentLoopNew = `\t\t\tthis.throwError(error);\n\t\t\tprocess.stderr.write("[dsh] agent turn failed: " + (error && error.stack ? error.stack : String(error)) + "\\n");\n\t\t} finally {`;
+if (agentLoopSource.includes(agentLoopOld)) {
+  agentLoopSource = agentLoopSource.replace(agentLoopOld, agentLoopNew);
+  changed = true;
+  process.stderr.write('[dsh] agent turn error logging added\n');
+} else {
+  process.stderr.write('[dsh] WARNING: agent-loop error target not found; continuing\n');
+}
+fs.writeFileSync(agentLoopFile, agentLoopSource);
+
 if (!changed) {
   process.stderr.write('[dsh] WARNING: signal registration patch target not found\n');
   process.exit(2);

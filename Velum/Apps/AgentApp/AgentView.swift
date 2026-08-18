@@ -54,6 +54,7 @@ final class DshAgentModel: ObservableObject {
     @Published var phase: DshAgentPhase = .starting
     @Published var logLines: [String] = []
     @Published var showWebLog = false
+    @Published var webViewEpoch = 0
 
     private var serviceTask: Task<Void, Never>?
     private var consumerTask: Task<Void, Never>?
@@ -75,7 +76,26 @@ final class DshAgentModel: ObservableObject {
 
     func retry() {
         shutdown()
+        webViewEpoch += 1
         start()
+    }
+
+    /// iOS suspends WebKit's network process while the app is backgrounded, so
+    /// on return the page's fetch/WebSocket connections all fail with "Load
+    /// failed". If the guest server is still healthy, reloading the WebView
+    /// re-establishes every connection; otherwise restart dsh as well.
+    func handleSceneActive() {
+        guard phase == .ready else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            if await Self.probeWebServer() {
+                appendLog("↻ 应用回到前台：重新加载 WebView")
+                webViewEpoch += 1
+            } else {
+                appendLog("↻ 应用回到前台：dsh 未响应，重启服务")
+                retry()
+            }
+        }
     }
 
     func shutdown() {
@@ -168,6 +188,7 @@ final class DshAgentModel: ObservableObject {
 
 struct AgentView: View {
     @StateObject private var model = DshAgentModel()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ZStack {
@@ -184,6 +205,11 @@ struct AgentView: View {
         .background(Color(.systemBackground))
         .onAppear { model.start() }
         .onDisappear { model.shutdown() }
+        .onChange(of: scenePhase) { newPhase in
+            if newPhase == .active {
+                model.handleSceneActive()
+            }
+        }
     }
 
     // MARK: - Ready-state web diagnostics
@@ -300,6 +326,7 @@ private struct DshWebView: UIViewRepresentable {
 
     final class Coordinator: NSObject, WKScriptMessageHandler {
         weak var model: DshAgentModel?
+        var lastLoadedEpoch = -1
 
         func userContentController(
             _ userContentController: WKUserContentController,
@@ -480,7 +507,12 @@ private struct DshWebView: UIViewRepresentable {
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
-        guard model.phase == .ready, webView.url == nil else { return }
-        webView.load(URLRequest(url: DshAgentModel.webURL))
+        guard model.phase == .ready else { return }
+        if webView.url == nil {
+            webView.load(URLRequest(url: DshAgentModel.webURL))
+        } else if context.coordinator.lastLoadedEpoch != model.webViewEpoch {
+            webView.reload()
+        }
+        context.coordinator.lastLoadedEpoch = model.webViewEpoch
     }
 }
