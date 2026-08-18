@@ -155,7 +155,7 @@ final class DshAgentModel: ObservableObject {
         }
     }
 
-    private func appendLog(_ line: String) {
+    func appendLog(_ line: String) {
         guard !line.isEmpty else { return }
         logLines.append(line)
         if logLines.count > maxLogLines {
